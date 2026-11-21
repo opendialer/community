@@ -1,3 +1,4 @@
+import { transactionalEmail } from '../email/transactional.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { transaction, invalidCode } from './common.js';
@@ -5,9 +6,9 @@ import { transaction, invalidCode } from './common.js';
 export type Purpose = 'verify' | 'reset' | 'invite';
 
 const messages = {
-  verify: { path: '/verify-email', subject: 'Complete your OpenDialer registration' },
-  reset: { path: '/reset-password', subject: 'Reset your OpenDialer password' },
-  invite: { path: '/accept-invitation', subject: 'Join your team on OpenDialer' }
+  verify: { heading: 'Verify Your Email', action: 'Verify Email', description: 'Verify your email address to finish creating your OpenDialer account.', path: '/verify-email', subject: 'Complete your OpenDialer registration' },
+  reset: { heading: 'Reset Your Password', action: 'Reset Password', description: 'Use the link below to choose a new OpenDialer password. If you didn’t request this, you can ignore this email.', path: '/reset-password', subject: 'Reset your OpenDialer password' },
+  invite: { heading: 'Team Invitation', action: 'Accept Invitation', description: 'You have been invited to join a team on OpenDialer.', path: '/accept-invitation', subject: 'Join your team on OpenDialer' }
 };
 
 function signature(id: string, purpose: Purpose) {
@@ -50,8 +51,8 @@ export async function deliverIdentityEmail(send: typeof fetch = fetch): Promise<
   const frontend = process.env.FRONTEND_URL;
   if (!key || !from || !frontend) return false;
   return transaction(async db => {
-    const claim = await db.query<{id: string; purpose: Purpose; email: string; organization: string|null}>(
-      `SELECT m.id,m.purpose,m.email,o.name AS organization FROM identity_messages m
+    const claim = await db.query<{id: string; purpose: Purpose; email: string; organization: string|null; legacy_email_design: boolean}>(
+      `SELECT m.id,m.purpose,m.email,m.legacy_email_design,o.name AS organization FROM identity_messages m
        LEFT JOIN invitations i ON i.id=m.id LEFT JOIN organizations o ON o.id=i.organization_id
        WHERE sent_at IS NULL AND consumed_at IS NULL AND next_attempt_at<=now() AND expires_at>now()
        ORDER BY next_attempt_at,m.id LIMIT 1 FOR UPDATE OF m SKIP LOCKED`
@@ -64,11 +65,15 @@ export async function deliverIdentityEmail(send: typeof fetch = fetch): Promise<
     link.hash = new URLSearchParams({ code }).toString();
     let providerStatus: number | undefined;
     try {
+      const invitation = job.organization ? 'You have been invited to join ' + job.organization.replace(/\s+/g,' ') + ' on OpenDialer' : undefined;
+      const content = job.legacy_email_design
+        ? {text: (invitation ?? template.subject) + '\n\n' + link.href + '\n\nOr enter this code:\n' + code}
+        : transactionalEmail({heading:template.heading, description:invitation ? invitation+'.' : template.description, action:{label:template.action,url:link},code});
       const result = await send('https://api.resend.com/emails', {
         method: 'POST',
         headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', 'Idempotency-Key': job.id },
         body: JSON.stringify({ from, to: [job.email], subject: template.subject,
-          text: (job.organization ? 'You have been invited to join ' + job.organization.replace(/\s+/g,' ') + ' on OpenDialer' : template.subject) + '\n\n' + link.href + '\n\nOr enter this code:\n' + code }),
+          ...content }),
         signal: AbortSignal.timeout(8000)
       });
       providerStatus=result.status;
