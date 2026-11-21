@@ -1,0 +1,141 @@
+import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
+import { createRoute, type OpenAPIHono, z } from '@hono/zod-openapi';
+import { getConnInfo } from '@hono/node-server/conninfo';
+import type { Context } from 'hono';
+import { HTTPException } from 'hono/http-exception';
+import { pool } from '../db.js';
+import { accepted, body, code, email, errors, invalidCode, json, password, security, transaction } from './common.js';
+import { consumeCode, queueEmail } from './mail.js';
+
+const tags = ['Authentication'];
+const userSchema = z.object({ id: z.uuid(), email: z.email() });
+const creds = z.object({ email, password: z.string().min(1).max(256) });
+const challenge = z.object({ code, password });
+const complete = { 200: json(accepted, 'Operation completed'), ...errors };
+const queued = { 202: json(accepted, 'Email queued when eligible'), ...errors };
+const digest = (value: string) => createHash('sha256').update(value).digest();
+
+function derive(password: string, salt: string) {
+  return new Promise<Buffer>((resolve, reject) => {
+    scrypt(password, salt, 32, { N: 32768, r: 8, p: 3, maxmem: 64 * 1024 * 1024 },
+      (err, result) => err ? reject(err) : resolve(result));
+  });
+}
+export async function hashPassword(password: string) {
+  const salt = randomBytes(16).toString('hex');
+  return salt + ':' + (await derive(password, salt)).toString('hex');
+}
+
+export async function limit(key: string, maximum: number) {
+  const result = await pool.query(
+    `INSERT INTO auth_rate_limits(bucket,attempts,expires_at) VALUES ($1,1,now()+interval '15 minutes')
+     ON CONFLICT (bucket) DO UPDATE SET
+       attempts=CASE WHEN auth_rate_limits.expires_at<=now() THEN 1 ELSE auth_rate_limits.attempts+1 END,
+       expires_at=CASE WHEN auth_rate_limits.expires_at<=now() THEN excluded.expires_at ELSE auth_rate_limits.expires_at END
+     RETURNING attempts`, [digest(key)]
+  );
+  if (result.rows[0].attempts > maximum) throw new HTTPException(429, { message: 'Try again later' });
+}
+
+async function throttle(c: Context, address: string, action: string, max: number) {
+  let ip: string | undefined;
+  if (process.env.TRUST_CADDY === 'true') ip = c.req.header('x-forwarded-for')?.split(',').at(-1)?.trim();
+  if (!ip && c.env?.incoming) ip = getConnInfo(c).remote.address;
+  if (ip) await limit('ip:' + action + ':' + ip, 100);
+  await limit(action + ':' + address, max);
+}
+
+export function tokenHash(request: Request) {
+  const token = /^Bearer ([\w-]{43})$/i.exec(request.headers.get('authorization') ?? '')?.[1];
+  if (!token) throw new HTTPException(401, { message: 'Valid bearer session required' });
+  return digest(token);
+}
+
+export async function requireUser(request: Request): Promise<{ id: string; email: string }> {
+  const result = await pool.query(
+    'SELECT u.id,u.email FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now()',
+    [tokenHash(request)]
+  );
+  if (!result.rowCount) throw new HTTPException(401, { message: 'Session expired or invalid' });
+  return result.rows[0];
+}
+
+export function registerAccounts(app: OpenAPIHono) {
+  for (const purpose of ['verify', 'reset'] as const) {
+    const register = purpose === 'verify';
+    app.openapi(createRoute({
+      tags, method: 'post', operationId: register ? 'requestRegistration' : 'requestPasswordReset', path: register ? '/v1/auth/register' : '/v1/auth/forgot-password',
+      summary: register ? 'Request a registration code by email' : 'Request a password reset code',
+      request: { body: body(z.object({ email })) }, responses: queued
+    }), async c => {
+      const { email: address } = c.req.valid('json');
+      await throttle(c, address, purpose, 4);
+      await transaction(async db => {
+        const existing = await db.query('SELECT id FROM users WHERE email=$1', [address]);
+        if (register ? !existing.rowCount : existing.rowCount) await queueEmail(db, address, purpose);
+      });
+      return c.json({ accepted: true as const }, 202);
+    });
+
+    app.openapi(createRoute({
+      tags, method: 'post', operationId: register ? 'completeRegistration' : 'resetPassword', path: register ? '/v1/auth/verify-email' : '/v1/auth/reset-password',
+      summary: register ? 'Verify email and choose a password' : 'Choose a new password and revoke all sessions',
+      request: { body: body(challenge) }, responses: complete
+    }), async c => {
+      const input = c.req.valid('json');
+      await transaction(async db => {
+        const msg = await consumeCode(db, input.code, purpose);
+        const hash = await hashPassword(input.password);
+        if (register) {
+          const user = await db.query('INSERT INTO users(email,password_hash) VALUES ($1,$2) ON CONFLICT DO NOTHING', [msg.email, hash]);
+          if (!user.rowCount) invalidCode();
+        } else {
+          const user = await db.query(
+            `UPDATE users SET password_hash=$1,password_changed_at=clock_timestamp() WHERE email=$2
+             AND password_changed_at < (SELECT created_at FROM identity_messages WHERE id=$3) RETURNING id`,
+            [hash, msg.email, msg.id]);
+          if (!user.rowCount) invalidCode();
+          await db.query('DELETE FROM sessions WHERE user_id=$1', [user.rows[0].id]);
+        }
+      });
+      return c.json({ accepted: true as const }, 200);
+    });
+  }
+
+  app.openapi(createRoute({
+    tags, method: 'post', operationId: 'login', path: '/v1/auth/login', summary: 'Create a seven-day bearer session',
+    request: { body: body(creds) },
+    responses: { 200: json(z.object({ accessToken: z.string(), tokenType: z.literal('Bearer'), expiresAt: z.iso.datetime(), user: userSchema }), 'Authenticated session'), ...errors }
+  }), async c => {
+    const input = c.req.valid('json');
+    await throttle(c, input.email, 'login', 30);
+    const lookup = await pool.query('SELECT id,email,password_hash FROM users WHERE email=$1', [input.email]);
+    const user = lookup.rows[0];
+    const [salt, hash] = (user?.password_hash ?? 'unknown:' + '0'.repeat(64)).split(':');
+    const valid = timingSafeEqual(await derive(input.password, salt), Buffer.from(hash, 'hex'));
+    if (!valid || !user) throw new HTTPException(401, { message: 'Invalid email or password' });
+    const token = randomBytes(32).toString('base64url');
+    const session = await transaction(async db => {
+      const locked = await db.query('SELECT id FROM users WHERE id=$1 AND password_hash=$2 FOR UPDATE', [user.id,user.password_hash]);
+      if (!locked.rowCount) throw new HTTPException(401, { message: 'Credentials changed' });
+      return db.query(`INSERT INTO sessions(user_id, token_hash,expires_at) VALUES ($1,$2,now()+interval '7 days') RETURNING expires_at`,
+        [user.id,digest(token)]);
+    });
+    c.header('Cache-Control','no-store');
+    return c.json({ accessToken: token, tokenType: 'Bearer' as const, expiresAt: session.rows[0].expires_at.toISOString(),
+      user: { id: user.id, email: user.email } }, 200);
+  });
+
+  app.openapi(createRoute({
+    tags, method: 'get', operationId: 'getCurrentUser', path: '/v1/auth/me', security, summary: 'Get the current account',
+    responses: { 200: json(userSchema, 'Current account'), ...errors }
+  }), async c => c.json(await requireUser(c.req.raw), 200));
+
+  app.openapi(createRoute({
+    tags, method: 'post', operationId: 'logout', path: '/v1/auth/logout', security, summary: 'Revoke the current bearer session',
+    responses: complete
+  }), async c => {
+    await pool.query('DELETE FROM sessions WHERE token_hash=$1', [tokenHash(c.req.raw)]);
+    return c.json({ accepted: true as const }, 200);
+  });
+}

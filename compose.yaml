@@ -1,0 +1,26 @@
+name: opendialer-community-check
+services:
+  db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: community_test
+      POSTGRES_USER: community_test
+      POSTGRES_PASSWORD: local-fixture
+    volumes:
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -h localhost -U community_test -d community_test']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  test:
+    build: .
+    environment:
+      DATABASE_URL: postgres://community_test:local-fixture@db/community_test
+      APP_SECRET: community-test-only-secret-with-at-least-32-characters
+      FRONTEND_URL: https://example.test
+      RESEND_API_KEY: fixture-not-a-real-key
+      RESEND_FROM: accounts@example.test
+    depends_on:
+      db:
+        condition: service_healthy
