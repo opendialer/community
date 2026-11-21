@@ -4,7 +4,7 @@
 |---|---|
 | Set up a team | Email registration and recovery, organizations, invitations, owner/admin/member roles, and transactional email through the operator's Resend account. |
 | Connect a carrier | Organization-funded carrier numbers and SIP connections, caller ID assignments and supported agent transports. Carrier capabilities vary. |
-| Make calls | Manual dialing and sequential power dialing, campaign phone-number queues, agent assignment, live session progress, and do-not-call suppression. |
+| Make calls | Manual dialing and sequential power dialing, campaign CSV uploads (10,000 rows, 500 MB), phone-number queues, agent assignment, live session progress, and do-not-call suppression. |
 | Follow up | Outcomes, notes, callbacks, supported transcripts, call history, basic pickup and voicemail rates, and Calendly/Cal.com. |
 | Operate locally | Docker Compose, PostgreSQL, ClickHouse for reporting, and an edition-specific OpenAPI contract. |
 
