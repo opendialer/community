@@ -13,3 +13,5 @@ Active sessions renew up to thirty days. Existing account holders receive sign-i
 - 2026-11-22 — Account requests and email jobs emit structured diagnostic events. Self-hosters can correlate request IDs in local logs and optionally forward logs to their own Axiom dataset.
 
 - 2026-11-22 — Axiom delivery checks event acknowledgments so operators can see when a batch was only partly ingested.
+
+- 2026-11-22 — Fast, successful liveness and readiness probes stay quiet. Slow and failed probes remain visible in request logs.

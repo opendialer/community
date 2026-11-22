@@ -27,7 +27,7 @@ export const traceRequest: MiddlewareHandler = async (c, next) => {
     if(status>=500)log.error('request_completed',{...fields,reason:statusReason(status,route)})
     else if(status>=400)log.warn('request_failed',{...fields,reason:statusReason(status,route)})
     else if(durationMs>=1000)log.warn('slow_request',{...fields,reason:'slow_response',thresholdMs:1000})
-    else if(c.req.method!=='GET' || route!=='/health')log.info('request_completed',fields)
+    else if(c.req.method!=='GET' || (route!=='/health/live' && route!=='/health/ready'))log.info('request_completed',fields)
   })
 }
 
