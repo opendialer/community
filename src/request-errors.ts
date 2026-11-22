@@ -44,6 +44,7 @@ export function requestError(c: Context, status: ContentfulStatusCode, message?:
 
 export function handleRequestError(err: Error, c: Context) {
   if (err instanceof HTTPException) {
+    if(err.status>=500)console.error(JSON.stringify({event:'service_error',requestId:c.get('supportRequestId'),status:err.status,...errorFields(err.cause??err)}))
     const retry=err.res?.headers.get('Retry-After')
     if(retry)c.header('Retry-After',retry)
     return requestError(c,err.status,err.message)

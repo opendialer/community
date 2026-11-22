@@ -9,7 +9,7 @@ export function errorFields(error:unknown){
     .replace(/["'`][^"'`\n]*["'`]/g,'[value]')
     .replace(/[\w.+-]+@[\w.-]+|\+?\d[\d ()-]{6,}\d|[A-Za-z\d+_/.~-]{24,}/g,'[value]')
     .replace(/[\r\n\t]/g,' ').slice(0,220)
-  const frames=(e.stack??'').split('\n').filter(l=>/^\s+at /.test(l)).slice(0,6)
+  const frames=(e.stack??'').split('\n').filter(l=>/^\s+at .+:\d+:\d+\)?$/.test(l)).slice(0,6)
     .map(l=>l.replace(/\?.*?(?=:\d+:\d+\)?$)/,'').trim().slice(0,180))
   return {errorType:e.name,message:safe(e.message.split('\n')[0]??''),...(sqlState?{sqlState}:{}),stack:frames}
 }
