@@ -26,6 +26,7 @@ let timer: NodeJS.Timeout | undefined
 let sending = false
 let dropped = 0
 let lastIngestError = 0
+let lastAckWarning = 0
 let retryAfter = 0
 
 export const axiomEnabled = Boolean(dataset && token)
@@ -85,8 +86,22 @@ async function flush(): Promise<boolean> {
       body: batch.join('\n'),
       signal: AbortSignal.timeout(5000)
     })
-    await response.body?.cancel()
-    if (!response.ok) throw new Error(`Axiom ingest returned ${response.status}`)
+    if (!response.ok) {
+      await response.body?.cancel()
+      throw new Error(`Axiom ingest returned ${response.status}`)
+    }
+    // A successful HTTP response can acknowledge only part of the batch. It does not identify
+    // every accepted record, so replaying the batch could duplicate accepted events.
+    const ack = await response.json().catch(() => null)
+    const valid = Number.isSafeInteger(ack?.ingested) && ack.ingested >= 0 &&
+      Number.isSafeInteger(ack?.failed) && ack.failed >= 0 && ack.ingested + ack.failed === batch.length
+    if ((!valid || ack.failed > 0) && Date.now() - lastAckWarning > 60000) {
+      lastAckWarning = Date.now()
+      logEvent('warn', valid ? 'log_events_dropped' : 'axiom_ingest_failed', {
+        reason: valid ? 'ingest_events_rejected' : 'ingest_counts_unconfirmed', batchSize: batch.length,
+        ...(valid ? { count: ack.failed, accepted: ack.ingested } : {})
+      })
+    }
   } catch (error) {
     ok = false
     retryAfter = Date.now() + 2000
