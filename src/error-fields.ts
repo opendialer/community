@@ -9,7 +9,16 @@ export function errorFields(error:unknown){
     .replace(/["'`][^"'`\n]*["'`]/g,'[value]')
     .replace(/[\w.+-]+@[\w.-]+|\+?\d[\d ()-]{6,}\d|[A-Za-z\d+_/.~-]{24,}/g,'[value]')
     .replace(/[\r\n\t]/g,' ').slice(0,220)
+  // Identifiers only (never values): which table, column or constraint a Postgres error names.
+  const ident=(v:unknown)=>typeof v==='string' && /^[\w.$]{1,63}$/.test(v)?v:undefined
+  const pg=e as unknown as Record<string,unknown>
+  const cause=e.cause instanceof Error?e.cause:undefined
+  const causeCode=cause && 'code' in cause && typeof cause.code==='string'?cause.code:undefined
   const frames=(e.stack??'').split('\n').filter(l=>/^\s+at .+:\d+:\d+\)?$/.test(l)).slice(0,6)
     .map(l=>l.replace(/\?.*?(?=:\d+:\d+\)?$)/,'').trim().slice(0,180))
-  return {errorType:e.name,message:safe(e.message.split('\n')[0]??''),...(sqlState?{sqlState}:{}),stack:frames}
+  return {errorType:e.name,message:safe(e.message.split('\n')[0]??''),...(sqlState?{sqlState}:{}),
+    ...(code && !sqlState && /^[A-Z][A-Z0-9_]{2,40}$/.test(code)?{errorCode:code}:{}),
+    ...(ident(pg.table)?{pgTable:ident(pg.table)}:{}),...(ident(pg.column)?{pgColumn:ident(pg.column)}:{}),...(ident(pg.constraint)?{pgConstraint:ident(pg.constraint)}:{}),
+    ...(cause?{cause:{errorType:cause.name,message:safe(cause.message.split('\n')[0]??''),...(causeCode && /^[A-Z][A-Z0-9_]{2,40}$/.test(causeCode)?{errorCode:causeCode}:{})}}:{}),
+    stack:frames}
 }

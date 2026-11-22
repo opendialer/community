@@ -9,3 +9,5 @@
 - 2026-11-22 — Added a main business number for manual calls and return-call routing to the planned Community dialer scope.
 
 Active sessions renew up to thirty days. Existing account holders receive sign-in instructions when they register again. Rate limits supply retry timing. Password hashing releases database capacity and server errors include sanitized diagnostics.
+
+- 2026-11-22 — Account requests and email jobs emit structured diagnostic events. Self-hosters can correlate request IDs in local logs and optionally forward logs to their own Axiom dataset.

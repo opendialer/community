@@ -1,6 +1,7 @@
 import { transactionalEmail } from '../email/transactional.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { PoolClient } from 'pg';
+import { log } from '../log.js';
 import { transaction, invalidCode } from './common.js';
 
 export type Purpose = 'verify' | 'reset' | 'invite' | 'existing';
@@ -24,15 +25,16 @@ export async function queueEmail(db: PoolClient, address: string, purpose: Purpo
     'INSERT INTO identity_messages(email, purpose, expires_at) VALUES ($1,$2,now()+$3::interval) RETURNING id',
     [address, purpose, lifetime]
   );
+  // Callers log identity_code_issued after their transaction commits.
   return rows[0]!.id;
 }
 
 export function verifyCodeSignature(code: string, purpose: Purpose) {
   const [id, mac] = code.split('.');
-  if (!id || !mac || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(id)) invalidCode();
+  if (!id || !mac || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(id)) invalidCode('malformed', { purpose });
   const expected = Buffer.from(signature(id, purpose));
   const actual = Buffer.from(mac);
-  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) invalidCode();
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) invalidCode('bad_signature', { purpose });
   return id;
 }
 
@@ -43,7 +45,7 @@ export async function consumeCode(db: PoolClient, code: string, purpose: Purpose
      WHERE id=$1 AND purpose=$2 AND consumed_at IS NULL AND expires_at>now() RETURNING id,email`,
     [id, purpose]
   );
-  return result.rows[0] ?? invalidCode();
+  return result.rows[0] ?? invalidCode('expired_or_used', { purpose, messageId: id });
 }
 
 export async function deliverIdentityEmail(send: typeof fetch = fetch): Promise<boolean> {
@@ -51,7 +53,9 @@ export async function deliverIdentityEmail(send: typeof fetch = fetch): Promise<
   const from = process.env.RESEND_FROM;
   const frontend = process.env.FRONTEND_URL;
   if (!key || !from || !frontend) return false;
-  return transaction(async db => {
+  // Outcome logs wait for COMMIT: until then neither the retry time nor sent_at is durable.
+  let after: (() => void) | undefined;
+  const worked = await transaction(async db => {
     const claim = await db.query<{id: string; purpose: Purpose; email: string; organization: string|null; legacy_email_design: boolean}>(
       `SELECT m.id,m.purpose,m.email,m.legacy_email_design,o.name AS organization FROM identity_messages m
        LEFT JOIN invitations i ON i.id=m.id LEFT JOIN organizations o ON o.id=i.organization_id
@@ -79,13 +83,17 @@ export async function deliverIdentityEmail(send: typeof fetch = fetch): Promise<
       });
       providerStatus=result.status;
       if (!result.ok) throw new Error('Resend HTTP ' + result.status);
-    } catch {
-      await db.query(`UPDATE identity_messages SET attempts=attempts+1,
-        next_attempt_at=now()+least(3600,30 * (2 ^ least(attempts,7))) * interval '1 second' WHERE id=$1`, [job.id]);
-      console.warn(JSON.stringify({event:'identity_delivery_deferred',jobId:job.id,providerStatus:providerStatus??null}));
+    } catch (error) {
+      const retry = await db.query<{attempts: number}>(`UPDATE identity_messages SET attempts=attempts+1,
+        next_attempt_at=now()+least(3600,30 * (2 ^ least(attempts,7))) * interval '1 second' WHERE id=$1 RETURNING attempts`, [job.id]);
+      const failure = { reason: providerStatus !== undefined ? 'provider_rejected' : error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError') ? 'provider_timeout' : 'provider_request_failed', jobId: job.id, messageId: job.id, purpose: job.purpose, providerStatus: providerStatus ?? null, attempts: retry.rows[0]?.attempts ?? null, error };
+      after = () => log.warn('identity_delivery_deferred', failure);
       return true;
     }
     await db.query('UPDATE identity_messages SET sent_at=now() WHERE id=$1', [job.id]);
+    after = () => log.info('identity_delivery_sent', { jobId: job.id, messageId: job.id, purpose: job.purpose, providerStatus: providerStatus ?? null });
     return true;
   });
+  after?.();
+  return worked;
 }

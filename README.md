@@ -35,6 +35,12 @@ The account routes are registered by `registerAccounts(app)`. The Compose projec
 
 For a working example with requests and responses, start with the [account integration test](tests/accounts.test.ts). The [route definitions](src/identity/accounts.ts) describe the request bodies, and the [mail delivery module](src/identity/mail.ts) handles verification, recovery, and team invitation messages through Resend. Organization and invitation tables are included for that module. Team management routes are planned.
 
+## Account diagnostics
+
+Account and mail delivery events write structured JSON to the process logs. Register the exported `traceRequest` middleware before the account routes and `handleRequestError` with Hono’s `onError` to correlate a response’s `X-Request-ID` with its route, status, and duration. Start with that ID when investigating a report.
+
+For optional Axiom delivery, configure `AXIOM_DATASET` and a dataset-scoped ingest token in `AXIOM_TOKEN` on your own service. Set `AXIOM_URL` for a regional ingest endpoint if needed. Without these settings, events stay in the local process logs. Limit log access and retention because diagnostics can contain internal account identifiers.
+
 ## Dialer roadmap
 
 ![OpenDialer design preview showing call outcomes and an agent on a connected call](assets/power-dialer-preview.png)
