@@ -3,7 +3,7 @@ type Message = {
   heading: string
   description: string
 } & (
-  | { action: { label: string; url: URL }; code: string }
+  | { action: { label: string; url: URL }; code?: string }
   | { unsubscribe: URL }
 )
 
@@ -22,9 +22,9 @@ export function transactionalEmail(message: Message) {
   let controls: string
   if ('action' in message) {
     const link = webLink(message.action.url)
-    text = message.description + '\n\n' + message.action.url.href + '\n\nOr enter this code:\n' + message.code
-    controls = `<table role="presentation" cellpadding="0" cellspacing="0"><tr><td bgcolor="#0A84FF" style="border-radius:6px;mso-padding-alt:6px 12px"><a href="${link}" style="display:inline-block;background-color:#0A84FF;border-radius:6px;padding:6px 12px;color:#FFFFFF;font-size:13px;font-weight:600;line-height:18px;text-decoration:none">${escape(message.action.label)}</a></td></tr></table>
-<p style="margin:18px 0 6px;font-size:12px;color:#ACACB0">Or enter this code in OpenDialer.</p>
+    text = message.description + '\n\n' + message.action.url.href + (message.code?'\n\nOr enter this code:\n' + message.code:'')
+    controls = `<table role="presentation" cellpadding="0" cellspacing="0"><tr><td bgcolor="#0A84FF" style="border-radius:6px;mso-padding-alt:6px 12px"><a href="${link}" style="display:inline-block;background-color:#0A84FF;border-radius:6px;padding:6px 12px;color:#FFFFFF;font-size:13px;font-weight:600;line-height:18px;text-decoration:none">${escape(message.action.label)}</a></td></tr></table>`
+    if(message.code)controls+=`<p style="margin:18px 0 6px;font-size:12px;color:#ACACB0">Or enter this code in OpenDialer.</p>
 <div style="background-color:#29292B;padding:10px 12px;border-radius:8px;font-size:13px;line-height:18px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;word-break:break-all">${escape(message.code)}</div>`
   } else {
     text = message.description + '\n\nUnsubscribe from updates about this feature:\n' + message.unsubscribe.href

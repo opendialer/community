@@ -5,7 +5,7 @@ import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { pool } from '../db.js';
 import { accepted, body, code, email, errors, invalidCode, json, password, security, transaction } from './common.js';
-import { consumeCode, queueEmail } from './mail.js';
+import { consumeCode, queueEmail, verifyCodeSignature } from './mail.js';
 
 const tags = ['Authentication'];
 const userSchema = z.object({ id: z.uuid(), email: z.email() });
@@ -32,9 +32,9 @@ export async function limit(key: string, maximum: number) {
      ON CONFLICT (bucket) DO UPDATE SET
        attempts=CASE WHEN auth_rate_limits.expires_at<=now() THEN 1 ELSE auth_rate_limits.attempts+1 END,
        expires_at=CASE WHEN auth_rate_limits.expires_at<=now() THEN excluded.expires_at ELSE auth_rate_limits.expires_at END
-     RETURNING attempts`, [digest(key)]
+     RETURNING attempts, greatest(1,ceil(extract(epoch from expires_at-now()))) AS retry`, [digest(key)]
   );
-  if (result.rows[0].attempts > maximum) throw new HTTPException(429, { message: 'Try again later' });
+  if (result.rows[0].attempts > maximum) throw new HTTPException(429, { message: 'Try again later',res:new Response(null,{status:429,headers:{'Retry-After':String(result.rows[0].retry)}}) });
 }
 
 async function throttle(c: Context, address: string, action: string, max: number) {
@@ -53,7 +53,7 @@ export function tokenHash(request: Request) {
 
 export async function requireUser(request: Request): Promise<{ id: string; email: string }> {
   const result = await pool.query(
-    'SELECT u.id,u.email FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now()',
+    'SELECT u.id,u.email FROM active_session($1) s JOIN users u ON u.id=s.user_id',
     [tokenHash(request)]
   );
   if (!result.rowCount) throw new HTTPException(401, { message: 'Session expired or invalid' });
@@ -72,7 +72,7 @@ export function registerAccounts(app: OpenAPIHono) {
       await throttle(c, address, purpose, 4);
       await transaction(async db => {
         const existing = await db.query('SELECT id FROM users WHERE email=$1', [address]);
-        if (register ? !existing.rowCount : existing.rowCount) await queueEmail(db, address, purpose);
+        if(register || existing.rowCount)await queueEmail(db,address,register && existing.rowCount?'existing':purpose);
       });
       return c.json({ accepted: true as const }, 202);
     });
@@ -83,9 +83,10 @@ export function registerAccounts(app: OpenAPIHono) {
       request: { body: body(challenge) }, responses: complete
     }), async c => {
       const input = c.req.valid('json');
+      verifyCodeSignature(input.code,purpose);
+      const hash = await hashPassword(input.password);
       await transaction(async db => {
         const msg = await consumeCode(db, input.code, purpose);
-        const hash = await hashPassword(input.password);
         if (register) {
           const user = await db.query('INSERT INTO users(email,password_hash) VALUES ($1,$2) ON CONFLICT DO NOTHING', [msg.email, hash]);
           if (!user.rowCount) invalidCode();
@@ -103,7 +104,7 @@ export function registerAccounts(app: OpenAPIHono) {
   }
 
   app.openapi(createRoute({
-    tags, method: 'post', operationId: 'login', path: '/v1/auth/login', summary: 'Create a seven-day bearer session',
+    tags, method: 'post', operationId: 'login', path: '/v1/auth/login', summary: 'Create a bearer session with seven-day idle and thirty-day absolute expiry',
     request: { body: body(creds) },
     responses: { 200: json(z.object({ accessToken: z.string(), tokenType: z.literal('Bearer'), expiresAt: z.iso.datetime(), user: userSchema }), 'Authenticated session'), ...errors }
   }), async c => {
@@ -128,8 +129,12 @@ export function registerAccounts(app: OpenAPIHono) {
 
   app.openapi(createRoute({
     tags, method: 'get', operationId: 'getCurrentUser', path: '/v1/auth/me', security, summary: 'Get the current account',
-    responses: { 200: json(userSchema, 'Current account'), ...errors }
-  }), async c => c.json(await requireUser(c.req.raw), 200));
+    responses: { 200: json(userSchema.extend({expiresAt:z.iso.datetime()}), 'Current account and renewed session expiry'), ...errors }
+  }), async c => {
+    const {rows:[session]}=await pool.query('SELECT u.id,u.email,s.expires_at AS expiry FROM active_session($1) s JOIN users u ON u.id=s.user_id',[tokenHash(c.req.raw)]);
+    if(!session)throw new HTTPException(401,{message:'Session expired or invalid'});
+    return c.json({id:session.id,email:session.email,expiresAt:session.expiry.toISOString()},200);
+  });
 
   app.openapi(createRoute({
     tags, method: 'post', operationId: 'logout', path: '/v1/auth/logout', security, summary: 'Revoke the current bearer session',

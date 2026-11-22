@@ -3,9 +3,10 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { transaction, invalidCode } from './common.js';
 
-export type Purpose = 'verify' | 'reset' | 'invite';
+export type Purpose = 'verify' | 'reset' | 'invite' | 'existing';
 
 const messages = {
+  existing: {heading:'Sign In to OpenDialer',action:'Sign In',description:'An OpenDialer account already exists for this email. Sign in with your password or choose Forgot Password to recover access.',path:'/login',subject:'You already have an OpenDialer account'},
   verify: { heading: 'Verify Your Email', action: 'Verify Email', description: 'Verify your email address to finish creating your OpenDialer account.', path: '/verify-email', subject: 'Complete your OpenDialer registration' },
   reset: { heading: 'Reset Your Password', action: 'Reset Password', description: 'Use the link below to choose a new OpenDialer password. If you didn’t request this, you can ignore this email.', path: '/reset-password', subject: 'Reset your OpenDialer password' },
   invite: { heading: 'Team Invitation', action: 'Accept Invitation', description: 'You have been invited to join a team on OpenDialer.', path: '/accept-invitation', subject: 'Join your team on OpenDialer' }
@@ -18,7 +19,7 @@ function signature(id: string, purpose: Purpose) {
 }
 
 export async function queueEmail(db: PoolClient, address: string, purpose: Purpose) {
-  const lifetime = { verify: '1 hour', reset: '30 minutes', invite: '7 days' }[purpose];
+  const lifetime = { verify: '1 hour', reset: '30 minutes', invite: '7 days', existing:'1 hour' }[purpose];
   const { rows } = await db.query<{ id: string }>(
     'INSERT INTO identity_messages(email, purpose, expires_at) VALUES ($1,$2,now()+$3::interval) RETURNING id',
     [address, purpose, lifetime]
@@ -62,13 +63,13 @@ export async function deliverIdentityEmail(send: typeof fetch = fetch): Promise<
     const code = job.id + '.' + signature(job.id, job.purpose);
     const template = messages[job.purpose];
     const link = new URL(template.path, frontend);
-    link.hash = new URLSearchParams({ code }).toString();
+    if(job.purpose!=='existing')link.hash = new URLSearchParams({ code }).toString();
     let providerStatus: number | undefined;
     try {
       const invitation = job.organization ? 'You have been invited to join ' + job.organization.replace(/\s+/g,' ') + ' on OpenDialer' : undefined;
       const content = job.legacy_email_design
         ? {text: (invitation ?? template.subject) + '\n\n' + link.href + '\n\nOr enter this code:\n' + code}
-        : transactionalEmail({heading:template.heading, description:invitation ? invitation+'.' : template.description, action:{label:template.action,url:link},code});
+        : transactionalEmail({heading:template.heading, description:invitation ? invitation+'.' : template.description, action:{label:template.action,url:link},code:job.purpose==='existing'?undefined:code});
       const result = await send('https://api.resend.com/emails', {
         method: 'POST',
         headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', 'Idempotency-Key': job.id },

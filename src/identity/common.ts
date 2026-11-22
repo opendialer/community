@@ -35,7 +35,7 @@ export const errors = {
   403: { description: 'Insufficient permission' },
   404: { description: 'Resource unavailable' },
   409: { description: 'Conflicting resource state' },
-  429: { description: 'Request limit reached' }
+  429: { description: 'Request limit reached', headers:{'Retry-After':{description:'Seconds before retrying',schema:{type:'integer' as const,minimum:1}}} }
 };
 export function invalidCode(): never {
   throw new HTTPException(400, { message: 'Invalid or expired code' });
